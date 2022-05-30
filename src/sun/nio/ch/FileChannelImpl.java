@@ -850,8 +850,10 @@ public class FileChannelImpl
     public MappedByteBuffer map(MapMode mode, long position, long size)
         throws IOException
     {
+        // 保证文件没有被关闭，基本上 FileChannel 所有方法都会进行判断
         ensureOpen();
         if (mode == null)
+            // 模式不能为空
             throw new NullPointerException("Mode is null");
         if (position < 0L)
             throw new IllegalArgumentException("Negative position");
@@ -860,6 +862,7 @@ public class FileChannelImpl
         if (position + size < 0)
             throw new IllegalArgumentException("Position + size overflow");
         if (size > Integer.MAX_VALUE)
+            // size 不能超过 Integer.MAX_VALUE，因为写入数据时，java 地址转换为 linux 地址时，需要将 size 转换为 int 类型
             throw new IllegalArgumentException("Size exceeds Integer.MAX_VALUE");
 
         int imode = -1;
@@ -886,13 +889,17 @@ public class FileChannelImpl
             long mapSize;
             int pagePosition;
             synchronized (positionLock) {
+                // 获取文件大小，判断是否需要扩展文件
                 long filesize;
                 do {
+                    // JNI 调用：fstat 获取文件大小
                     filesize = nd.size(fd);
                 } while ((filesize == IOStatus.INTERRUPTED) && isOpen());
+                // 遇到系统 EINTR 信号（被中断的系统调用）时，要一直重试，因为这不代表调用有错误，只是系统调用被中断了
                 if (!isOpen())
                     return null;
 
+                // 当映射的文件位置与大小超出文件大小时，需要扩展文件
                 if (filesize < position + size) { // Extend file size
                     if (!writable) {
                         throw new IOException("Channel not open for writing " +
@@ -900,12 +907,14 @@ public class FileChannelImpl
                     }
                     int rv;
                     do {
+                        // JNI 调用：ftruncate 扩展文件大小
                         rv = nd.truncate(fd, position + size);
                     } while ((rv == IOStatus.INTERRUPTED) && isOpen());
                     if (!isOpen())
                         return null;
                 }
 
+                // 如果映射 size 为 0，直接返回空的 DirectByteBuffer 或者只读的 DirectByteBufferR
                 if (size == 0) {
                     addr = 0;
                     // a valid file descriptor is not required
@@ -916,25 +925,33 @@ public class FileChannelImpl
                         return Util.newMappedByteBuffer(0, 0, dummy, null);
                 }
 
+                // 计算出页的位置，allocationGranularity 是系统文件分页大小（pageCache 的 page 大小）
                 pagePosition = (int)(position % allocationGranularity);
+                // 计算出映射起始页的位置
                 long mapPosition = position - pagePosition;
+                // 计算需要的大小
                 mapSize = size + pagePosition;
                 try {
+                    // JNI 调用：mmap 映射文件
                     // If map0 did not throw an exception, the address is valid
                     addr = map0(imode, mapPosition, mapSize);
                 } catch (OutOfMemoryError x) {
                     // An OutOfMemoryError may indicate that we've exhausted
                     // memory so force gc and re-attempt map
+                    // 如果内存不足，则强制进行一次 full-gc 回收内存，然后重试
                     System.gc();
                     try {
+                        // System.gc() 不会立刻回收内存，所以需要等待一段时间
                         Thread.sleep(100);
                     } catch (InterruptedException y) {
                         Thread.currentThread().interrupt();
                     }
                     try {
+                        // 再次尝试
                         addr = map0(imode, mapPosition, mapSize);
                     } catch (OutOfMemoryError y) {
                         // After a second OOME, fail
+                        // 如果内存不足，则抛出异常
                         throw new IOException("Map failed", y);
                     }
                 }
@@ -953,13 +970,16 @@ public class FileChannelImpl
             assert (IOStatus.checkAll(addr));
             assert (addr % allocationGranularity == 0);
             int isize = (int)size;
+            // 新建一个 Unmapper，在 gc 时回收 mmap 出来的内存，回收时调用 munmap
             Unmapper um = new Unmapper(addr, mapSize, isize, mfd);
             if ((!writable) || (imode == MAP_RO)) {
+                // 返回只读的 DirectByteBuffer 封装的 mmap 出来的内存
                 return Util.newMappedByteBufferR(isize,
                                                  addr + pagePosition,
                                                  mfd,
                                                  um);
             } else {
+                // 返回可读写的 DirectByteBuffer 封装的 mmap 出来的内存
                 return Util.newMappedByteBuffer(isize,
                                                 addr + pagePosition,
                                                 mfd,
