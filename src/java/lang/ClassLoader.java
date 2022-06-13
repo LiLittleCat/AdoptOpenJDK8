@@ -401,9 +401,11 @@ public abstract class ClassLoader {
             if (c == null) {
                 long t0 = System.nanoTime();
                 try {
+                    // 如果存在父类加载器，就委托给父类加载器加载
                     if (parent != null) {
                         c = parent.loadClass(name, false);
                     } else {
+                        // 如果不存在父类加载器，就检查是否是由启动类加载器加载的类，通过调用本地方法 native Class findBootstrapClass(String name)
                         c = findBootstrapClassOrNull(name);
                     }
                 } catch (ClassNotFoundException e) {
@@ -415,6 +417,7 @@ public abstract class ClassLoader {
                     // If still not found, then invoke findClass in order
                     // to find the class.
                     long t1 = System.nanoTime();
+                    // 如果父类加载器和启动类加载器都不能完成加载任务，才调用自身的加载功能
                     c = findClass(name);
 
                     // this is the defining class loader; record the stats
